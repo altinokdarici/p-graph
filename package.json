@@ -1,7 +1,7 @@
 {
   "name": "@altinokdarici/p-graph",
   "version": "0.1.0",
-  "description": "A dynamic, dependency-aware priority graph (priority queue + DAG) for TypeScript with pluggable serialization.",
+  "description": "A dynamic priority graph with labelled edges: a dependency-aware priority queue for TypeScript with pluggable serialization.",
   "keywords": [
     "priority",
     "graph",
@@ -9,7 +9,8 @@
     "dag",
     "topological-sort",
     "scheduler",
-    "dependency-graph"
+    "dependency-graph",
+    "edge-labels"
   ],
   "license": "MIT",
   "author": "Altinok Darici",

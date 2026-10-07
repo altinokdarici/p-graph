@@ -29,11 +29,20 @@ export interface GraphNode<T> {
   readonly dependencies: readonly NodeId[];
 }
 
-export interface AddNodeOptions {
+/** A dependency given to `addNode`, optionally carrying edge data. */
+export interface DependencySpec<E = undefined> {
+  id: NodeId;
+  data?: E;
+}
+
+export interface AddNodeOptions<E = undefined> {
   /** Defaults to the graph's `defaultPriority` (0 unless configured). */
   priority?: number;
-  /** Ids of existing nodes that must complete before this node becomes ready. */
-  dependsOn?: readonly NodeId[];
+  /**
+   * Existing nodes that must complete before this node becomes ready, given as
+   * ids or as `{ id, data }` to attach data to the edge.
+   */
+  dependsOn?: readonly (NodeId | DependencySpec<E>)[];
 }
 
 /**
@@ -49,10 +58,15 @@ export interface NodeRecord<T> {
   order: number;
 }
 
-/** Persisted form of one edge: node `id` depends on node `dependsOn`. */
-export interface DependencyRecord {
+/**
+ * Persisted form of one edge: node `id` depends on node `dependsOn`. `data` is
+ * free-form edge data that the graph stores but never interprets; the key is
+ * omitted when there is none.
+ */
+export interface DependencyRecord<E = undefined> {
   id: NodeId;
   dependsOn: NodeId;
+  data?: E;
 }
 
 /** Mutable fields of a {@link NodeRecord} reported by `node-updated` changes. */
@@ -62,11 +76,12 @@ export type NodeField = "data" | "priority" | "state";
  * One persisted fact that changed. Applying every change, in order, to a copy
  * of a snapshot reproduces the graph's current snapshot exactly.
  */
-export type GraphChange<T> =
+export type GraphChange<T, E = undefined> =
   | { type: "node-added"; node: NodeRecord<T> }
   | { type: "node-updated"; node: NodeRecord<T>; fields: readonly NodeField[] }
   | { type: "node-removed"; id: NodeId }
-  | { type: "dependency-added"; id: NodeId; dependsOn: NodeId }
+  | { type: "dependency-added"; id: NodeId; dependsOn: NodeId; data?: E }
+  | { type: "dependency-updated"; id: NodeId; dependsOn: NodeId; data: E }
   | { type: "dependency-removed"; id: NodeId; dependsOn: NodeId };
 
 /**
@@ -79,19 +94,19 @@ export type GraphChange<T> =
  * order and never concurrently; `graph.flush()` resolves once all of them have
  * been applied.
  */
-export interface GraphStore<T> {
-  apply(changes: readonly GraphChange<T>[]): void | PromiseLike<void>;
+export interface GraphStore<T, E = undefined> {
+  apply(changes: readonly GraphChange<T, E>[]): void | PromiseLike<void>;
 }
 
 /** Complete, plain-object representation of a graph. */
-export interface GraphSnapshot<T> {
+export interface GraphSnapshot<T, E = undefined> {
   version: 1;
   /** Sorted by `order`. */
   nodes: NodeRecord<T>[];
-  dependencies: DependencyRecord[];
+  dependencies: DependencyRecord<E>[];
 }
 
-export interface PriorityGraphOptions<T> {
+export interface PriorityGraphOptions<T, E = undefined> {
   /**
    * When true, a node's effective priority is raised to the highest effective
    * priority among the nodes that depend on it, so prerequisites of urgent
@@ -101,5 +116,5 @@ export interface PriorityGraphOptions<T> {
   /** Priority used when `addNode` is called without one. Defaults to `0`. */
   defaultPriority?: number;
   /** Receives every change so the graph can be persisted incrementally. */
-  store?: GraphStore<T>;
+  store?: GraphStore<T, E>;
 }

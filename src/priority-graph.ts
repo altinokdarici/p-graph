@@ -1,5 +1,6 @@
 import {
   CycleError,
+  DependencyNotFoundError,
   DuplicateNodeError,
   InvalidSnapshotError,
   InvalidStateError,
@@ -10,6 +11,7 @@ import { IndexedHeap, type HeapItem } from "./heap.js";
 import type {
   AddNodeOptions,
   DependencyRecord,
+  DependencySpec,
   GraphChange,
   GraphNode,
   GraphSnapshot,
@@ -21,14 +23,15 @@ import type {
   PriorityGraphOptions,
 } from "./types.js";
 
-interface Entry<T> extends HeapItem {
+interface Entry<T, E> extends HeapItem {
   readonly id: NodeId;
   data: T;
   priority: number;
   effectivePriority: number;
   state: NodeState;
   readonly order: number;
-  readonly dependencies: Set<NodeId>;
+  /** Dependency ids mapped to their edge data. */
+  readonly dependencies: Map<NodeId, E | undefined>;
   readonly dependents: Set<NodeId>;
   /** Number of dependencies that are not completed yet. */
   unmet: number;
@@ -36,7 +39,7 @@ interface Entry<T> extends HeapItem {
 
 const NODE_STATES: readonly NodeState[] = ["pending", "ready", "in-progress", "completed"];
 
-const before = <T>(a: Entry<T>, b: Entry<T>): boolean =>
+const before = <T, E>(a: Entry<T, E>, b: Entry<T, E>): boolean =>
   a.effectivePriority > b.effectivePriority ||
   (a.effectivePriority === b.effectivePriority && a.order < b.order);
 
@@ -46,11 +49,12 @@ const before = <T>(a: Entry<T>, b: Entry<T>): boolean =>
  * Nodes become `ready` once all of their dependencies are `completed`, and
  * ready nodes are dequeued highest priority first (ties in insertion order).
  * Nodes, dependencies and priorities can change at any time, including while
- * the graph is being traversed.
+ * the graph is being traversed. Each dependency edge can carry optional data
+ * of type `E`.
  */
-export class PriorityGraph<T = unknown> {
-  readonly #nodes = new Map<NodeId, Entry<T>>();
-  readonly #heap = new IndexedHeap<Entry<T>>(before);
+export class PriorityGraph<T = unknown, E = undefined> {
+  readonly #nodes = new Map<NodeId, Entry<T, E>>();
+  readonly #heap = new IndexedHeap<Entry<T, E>>(before);
   readonly #counts: Record<NodeState, number> = {
     pending: 0,
     ready: 0,
@@ -59,16 +63,16 @@ export class PriorityGraph<T = unknown> {
   };
   readonly #inheritPriority: boolean;
   readonly #defaultPriority: number;
-  readonly #store: GraphStore<T> | undefined;
+  readonly #store: GraphStore<T, E> | undefined;
   #nextOrder = 0;
 
-  #batch: GraphChange<T>[] = [];
-  readonly #queue: (readonly GraphChange<T>[])[] = [];
+  #batch: GraphChange<T, E>[] = [];
+  readonly #queue: (readonly GraphChange<T, E>[])[] = [];
   #pumping = false;
   #inflight: Promise<void> | undefined;
   #storeError: StoreError | undefined;
 
-  constructor(options: PriorityGraphOptions<T> = {}) {
+  constructor(options: PriorityGraphOptions<T, E> = {}) {
     this.#inheritPriority = options.inheritPriority ?? false;
     this.#defaultPriority = options.defaultPriority ?? 0;
     assertPriority(this.#defaultPriority);
@@ -80,11 +84,11 @@ export class PriorityGraph<T = unknown> {
    * rows). `pending`/`ready` states and effective priorities are recomputed
    * from the dependencies. Loading does not emit changes to the store.
    */
-  static fromSnapshot<T>(
-    snapshot: GraphSnapshot<T>,
-    options: PriorityGraphOptions<T> = {},
-  ): PriorityGraph<T> {
-    const graph = new PriorityGraph<T>(options);
+  static fromSnapshot<T, E = undefined>(
+    snapshot: GraphSnapshot<T, E>,
+    options: PriorityGraphOptions<T, E> = {},
+  ): PriorityGraph<T, E> {
+    const graph = new PriorityGraph<T, E>(options);
     graph.#load(snapshot);
     return graph;
   }
@@ -128,18 +132,33 @@ export class PriorityGraph<T = unknown> {
   }
 
   dependenciesOf(id: NodeId): NodeId[] {
-    return [...this.#require(id).dependencies];
+    return [...this.#require(id).dependencies.keys()];
   }
 
   dependentsOf(id: NodeId): NodeId[] {
     return [...this.#require(id).dependents];
   }
 
+  /** Edges from `id` to each of its dependencies, with their data. */
+  dependencyEdges(id: NodeId): DependencyRecord<E>[] {
+    const entry = this.#require(id);
+    return [...entry.dependencies].map(([dependsOn, data]) => toEdge(id, dependsOn, data));
+  }
+
+  /** Edges from each node that depends on `id` to `id`, with their data. */
+  dependentEdges(id: NodeId): DependencyRecord<E>[] {
+    const entry = this.#require(id);
+    return [...this.#entries(entry.dependents)].map((dependent) =>
+      toEdge(dependent.id, id, dependent.dependencies.get(id)),
+    );
+  }
+
   /**
    * Adds a node. It is `ready` immediately unless one of `dependsOn` is not
-   * completed yet. Dependencies must already exist.
+   * completed yet. Dependencies must already exist. Each dependency is an id
+   * or `{ id, data }`; if one is listed twice, the first occurrence wins.
    */
-  addNode(id: NodeId, data: T, options: AddNodeOptions = {}): GraphNode<T> {
+  addNode(id: NodeId, data: T, options: AddNodeOptions<E> = {}): GraphNode<T> {
     this.#assertWritable();
     if (typeof id !== "string") {
       throw new TypeError(`Node id must be a string, got ${typeof id}.`);
@@ -152,15 +171,19 @@ export class PriorityGraph<T = unknown> {
     if (typeof options.dependsOn === "string") {
       throw new TypeError("dependsOn must be an array of node ids, not a string.");
     }
-    const dependencies = new Set<NodeId>(options.dependsOn ?? []);
-    for (const dependency of dependencies) {
+    const dependencies = new Map<NodeId, E | undefined>();
+    for (const spec of options.dependsOn ?? []) {
+      const [dependency, edgeData] = parseDependency<E>(spec);
       this.#require(dependency);
+      if (!dependencies.has(dependency)) {
+        dependencies.set(dependency, edgeData);
+      }
     }
 
     return this.#mutate(() => {
       const entry = this.#createEntry(id, data, priority, this.#nextOrder++, dependencies);
-      for (const dependency of dependencies) {
-        const target = this.#nodes.get(dependency) as Entry<T>;
+      for (const dependency of dependencies.keys()) {
+        const target = this.#nodes.get(dependency) as Entry<T, E>;
         target.dependents.add(id);
         if (target.state !== "completed") {
           entry.unmet++;
@@ -172,10 +195,10 @@ export class PriorityGraph<T = unknown> {
         this.#heap.push(entry);
       }
       this.#record({ type: "node-added", node: toRecord(entry) });
-      for (const dependency of dependencies) {
-        this.#record({ type: "dependency-added", id, dependsOn: dependency });
+      for (const [dependency, edgeData] of dependencies) {
+        this.#record(dependencyAdded(id, dependency, edgeData));
       }
-      this.#refresh(this.#entries(dependencies));
+      this.#refresh(this.#entries(dependencies.keys()));
       return this.#view(entry);
     });
   }
@@ -231,10 +254,12 @@ export class PriorityGraph<T = unknown> {
 
   /**
    * Makes `id` wait for `dependsOn`. Only nodes that have not started
-   * (`pending` or `ready`) can gain dependencies. Adding an existing edge is a
-   * no-op. Throws {@link CycleError} if the edge would create a cycle.
+   * (`pending` or `ready`) can gain dependencies. `data` is stored on the edge.
+   * Adding an existing edge is a no-op (its data is left unchanged; use
+   * `setDependencyData`). Throws {@link CycleError} if the edge would create a
+   * cycle.
    */
-  addDependency(id: NodeId, dependsOn: NodeId): void {
+  addDependency(id: NodeId, dependsOn: NodeId, data?: E): void {
     this.#assertWritable();
     const entry = this.#require(id);
     const target = this.#require(dependsOn);
@@ -250,9 +275,9 @@ export class PriorityGraph<T = unknown> {
     }
 
     this.#mutate(() => {
-      entry.dependencies.add(dependsOn);
+      entry.dependencies.set(dependsOn, data);
       target.dependents.add(id);
-      this.#record({ type: "dependency-added", id, dependsOn });
+      this.#record(dependencyAdded(id, dependsOn, data));
       if (target.state !== "completed") {
         entry.unmet++;
         if (entry.state === "ready") {
@@ -261,6 +286,23 @@ export class PriorityGraph<T = unknown> {
         }
       }
       this.#refresh([target]);
+    });
+  }
+
+  /**
+   * Replaces the data of the edge `id` -> `dependsOn`, in any node state.
+   * Throws {@link DependencyNotFoundError} if the edge does not exist.
+   */
+  setDependencyData(id: NodeId, dependsOn: NodeId, data: E): void {
+    this.#assertWritable();
+    const entry = this.#require(id);
+    this.#require(dependsOn);
+    if (!entry.dependencies.has(dependsOn)) {
+      throw new DependencyNotFoundError(id, dependsOn);
+    }
+    this.#mutate(() => {
+      entry.dependencies.set(dependsOn, data);
+      this.#record({ type: "dependency-updated", id, dependsOn, data });
     });
   }
 
@@ -360,13 +402,13 @@ export class PriorityGraph<T = unknown> {
   }
 
   /** Full plain-object copy of the graph. Node data is not cloned. */
-  toSnapshot(): GraphSnapshot<T> {
+  toSnapshot(): GraphSnapshot<T, E> {
     const nodes: NodeRecord<T>[] = [];
-    const dependencies: DependencyRecord[] = [];
+    const dependencies: DependencyRecord<E>[] = [];
     for (const entry of this.#nodes.values()) {
       nodes.push(toRecord(entry));
-      for (const dependsOn of entry.dependencies) {
-        dependencies.push({ id: entry.id, dependsOn });
+      for (const [dependsOn, data] of entry.dependencies) {
+        dependencies.push(toEdge(entry.id, dependsOn, data));
       }
     }
     return { version: 1, nodes, dependencies };
@@ -392,9 +434,9 @@ export class PriorityGraph<T = unknown> {
     data: T,
     priority: number,
     order: number,
-    dependencies: Set<NodeId>,
-  ): Entry<T> {
-    const entry: Entry<T> = {
+    dependencies: Map<NodeId, E | undefined>,
+  ): Entry<T, E> {
+    const entry: Entry<T, E> = {
       id,
       data,
       priority,
@@ -410,8 +452,8 @@ export class PriorityGraph<T = unknown> {
     return entry;
   }
 
-  #remove(entry: Entry<T>): void {
-    for (const dependency of this.#entries(entry.dependencies)) {
+  #remove(entry: Entry<T, E>): void {
+    for (const dependency of this.#entries(entry.dependencies.keys())) {
       dependency.dependents.delete(entry.id);
       this.#record({ type: "dependency-removed", id: entry.id, dependsOn: dependency.id });
     }
@@ -429,11 +471,11 @@ export class PriorityGraph<T = unknown> {
         this.#satisfy(dependent);
       }
     }
-    this.#refresh(this.#entries(entry.dependencies));
+    this.#refresh(this.#entries(entry.dependencies.keys()));
   }
 
   /** One unmet dependency of `entry` went away. Returns true if it became ready. */
-  #satisfy(entry: Entry<T>): boolean {
+  #satisfy(entry: Entry<T, E>): boolean {
     entry.unmet--;
     if (entry.unmet === 0 && entry.state === "pending") {
       this.#setState(entry, "ready");
@@ -443,7 +485,7 @@ export class PriorityGraph<T = unknown> {
     return false;
   }
 
-  #setState(entry: Entry<T>, state: NodeState): void {
+  #setState(entry: Entry<T, E>, state: NodeState): void {
     this.#counts[entry.state]--;
     this.#counts[state]++;
     entry.state = state;
@@ -451,7 +493,7 @@ export class PriorityGraph<T = unknown> {
   }
 
   /** Recomputes effective priorities starting at `start`, following dependencies. */
-  #refresh(start: Iterable<Entry<T>>): void {
+  #refresh(start: Iterable<Entry<T, E>>): void {
     const work = new Set(start);
     for (const entry of work) {
       work.delete(entry);
@@ -467,7 +509,7 @@ export class PriorityGraph<T = unknown> {
         entry.effectivePriority = effective;
         this.#heap.update(entry);
         if (this.#inheritPriority) {
-          for (const dependency of this.#entries(entry.dependencies)) {
+          for (const dependency of this.#entries(entry.dependencies.keys())) {
             work.add(dependency);
           }
         }
@@ -476,14 +518,14 @@ export class PriorityGraph<T = unknown> {
   }
 
   /** Path of ids from `from` to `to` along dependency edges, if one exists. */
-  #findPath(from: Entry<T>, to: Entry<T>): NodeId[] | undefined {
-    const parents = new Map<Entry<T>, Entry<T> | undefined>([[from, undefined]]);
+  #findPath(from: Entry<T, E>, to: Entry<T, E>): NodeId[] | undefined {
+    const parents = new Map<Entry<T, E>, Entry<T, E> | undefined>([[from, undefined]]);
     const stack = [from];
     while (stack.length > 0) {
-      const current = stack.pop() as Entry<T>;
+      const current = stack.pop() as Entry<T, E>;
       if (current === to) {
         const path: NodeId[] = [];
-        for (let step: Entry<T> | undefined = current; step; step = parents.get(step)) {
+        for (let step: Entry<T, E> | undefined = current; step; step = parents.get(step)) {
           path.push(step.id);
         }
         return path.reverse();
@@ -492,7 +534,7 @@ export class PriorityGraph<T = unknown> {
       if (current.state === "completed") {
         continue;
       }
-      for (const next of this.#entries(current.dependencies)) {
+      for (const next of this.#entries(current.dependencies.keys())) {
         if (!parents.has(next)) {
           parents.set(next, current);
           stack.push(next);
@@ -502,7 +544,7 @@ export class PriorityGraph<T = unknown> {
     return undefined;
   }
 
-  #load(snapshot: GraphSnapshot<T>): void {
+  #load(snapshot: GraphSnapshot<T, E>): void {
     if (snapshot?.version !== 1 || !Array.isArray(snapshot.nodes)) {
       throw new InvalidSnapshotError("Unsupported snapshot format; expected version 1.");
     }
@@ -523,24 +565,24 @@ export class PriorityGraph<T = unknown> {
       }
       assertPriority(record.priority);
       previousOrder = record.order;
-      const entry = this.#createEntry(record.id, record.data, record.priority, record.order, new Set());
+      const entry = this.#createEntry(record.id, record.data, record.priority, record.order, new Map());
       entry.state = record.state;
       this.#nextOrder = record.order + 1;
     }
 
-    for (const { id, dependsOn } of snapshot.dependencies ?? []) {
+    for (const { id, dependsOn, data } of snapshot.dependencies ?? []) {
       const entry = this.#nodes.get(id);
       const target = this.#nodes.get(dependsOn);
       if (!entry || !target) {
         throw new InvalidSnapshotError(`Dependency "${id}" -> "${dependsOn}" references a missing node.`);
       }
-      entry.dependencies.add(dependsOn);
+      entry.dependencies.set(dependsOn, data);
       target.dependents.add(id);
     }
 
     // Kahn's algorithm: dependencies before dependents.
-    const order: Entry<T>[] = [];
-    const remaining = new Map<Entry<T>, number>();
+    const order: Entry<T, E>[] = [];
+    const remaining = new Map<Entry<T, E>, number>();
     for (const entry of this.#nodes.values()) {
       remaining.set(entry, entry.dependencies.size);
       if (entry.dependencies.size === 0) {
@@ -548,7 +590,7 @@ export class PriorityGraph<T = unknown> {
       }
     }
     for (let i = 0; i < order.length; i++) {
-      for (const dependent of this.#entries((order[i] as Entry<T>).dependents)) {
+      for (const dependent of this.#entries((order[i] as Entry<T, E>).dependents)) {
         const left = (remaining.get(dependent) as number) - 1;
         remaining.set(dependent, left);
         if (left === 0) {
@@ -558,19 +600,19 @@ export class PriorityGraph<T = unknown> {
     }
     if (order.length !== this.#nodes.size) {
       // Every unprocessed node has an unprocessed dependency, so walking them must loop.
-      const isStuck = (entry: Entry<T>): boolean => (remaining.get(entry) as number) > 0;
-      const path: Entry<T>[] = [];
-      let current = [...remaining.keys()].find(isStuck) as Entry<T>;
+      const isStuck = (entry: Entry<T, E>): boolean => (remaining.get(entry) as number) > 0;
+      const path: Entry<T, E>[] = [];
+      let current = [...remaining.keys()].find(isStuck) as Entry<T, E>;
       while (!path.includes(current)) {
         path.push(current);
-        current = [...this.#entries(current.dependencies)].find(isStuck) as Entry<T>;
+        current = [...this.#entries(current.dependencies.keys())].find(isStuck) as Entry<T, E>;
       }
       const cycle = path.slice(path.indexOf(current)).map((entry) => entry.id);
       throw new CycleError([...cycle, current.id]);
     }
 
     for (const entry of order) {
-      for (const dependency of this.#entries(entry.dependencies)) {
+      for (const dependency of this.#entries(entry.dependencies.keys())) {
         if (dependency.state !== "completed") {
           entry.unmet++;
         }
@@ -586,7 +628,7 @@ export class PriorityGraph<T = unknown> {
     }
 
     for (let i = order.length - 1; i >= 0; i--) {
-      const entry = order[i] as Entry<T>;
+      const entry = order[i] as Entry<T, E>;
       if (this.#inheritPriority) {
         for (const dependent of this.#entries(entry.dependents)) {
           entry.effectivePriority = Math.max(entry.effectivePriority, dependent.effectivePriority);
@@ -598,7 +640,7 @@ export class PriorityGraph<T = unknown> {
     }
   }
 
-  #require(id: NodeId): Entry<T> {
+  #require(id: NodeId): Entry<T, E> {
     const entry = this.#nodes.get(id);
     if (!entry) {
       throw new NodeNotFoundError(id);
@@ -606,13 +648,13 @@ export class PriorityGraph<T = unknown> {
     return entry;
   }
 
-  *#entries(ids: Iterable<NodeId>): Generator<Entry<T>> {
+  *#entries(ids: Iterable<NodeId>): Generator<Entry<T, E>> {
     for (const id of ids) {
-      yield this.#nodes.get(id) as Entry<T>;
+      yield this.#nodes.get(id) as Entry<T, E>;
     }
   }
 
-  #view(entry: Entry<T>): GraphNode<T> {
+  #view(entry: Entry<T, E>): GraphNode<T> {
     return {
       id: entry.id,
       data: entry.data,
@@ -620,7 +662,7 @@ export class PriorityGraph<T = unknown> {
       effectivePriority: entry.effectivePriority,
       state: entry.state,
       order: entry.order,
-      dependencies: [...entry.dependencies],
+      dependencies: [...entry.dependencies.keys()],
     };
   }
 
@@ -640,13 +682,13 @@ export class PriorityGraph<T = unknown> {
     }
   }
 
-  #record(change: GraphChange<T>): void {
+  #record(change: GraphChange<T, E>): void {
     if (this.#store) {
       this.#batch.push(change);
     }
   }
 
-  #recordUpdate(entry: Entry<T>, field: NodeField): void {
+  #recordUpdate(entry: Entry<T, E>, field: NodeField): void {
     if (this.#store) {
       this.#batch.push({ type: "node-updated", node: toRecord(entry), fields: [field] });
     }
@@ -667,10 +709,10 @@ export class PriorityGraph<T = unknown> {
   }
 
   #pump(): void {
-    const store = this.#store as GraphStore<T>;
+    const store = this.#store as GraphStore<T, E>;
     this.#pumping = true;
     while (this.#queue.length > 0 && !this.#storeError) {
-      const batch = this.#queue.shift() as readonly GraphChange<T>[];
+      const batch = this.#queue.shift() as readonly GraphChange<T, E>[];
       let result: void | PromiseLike<void>;
       try {
         result = store.apply(batch);
@@ -708,7 +750,7 @@ export class PriorityGraph<T = unknown> {
   }
 }
 
-function toRecord<T>(entry: Entry<T>): NodeRecord<T> {
+function toRecord<T, E>(entry: Entry<T, E>): NodeRecord<T> {
   return {
     id: entry.id,
     data: entry.data,
@@ -716,6 +758,26 @@ function toRecord<T>(entry: Entry<T>): NodeRecord<T> {
     state: entry.state,
     order: entry.order,
   };
+}
+
+function toEdge<E>(id: NodeId, dependsOn: NodeId, data: E | undefined): DependencyRecord<E> {
+  return data === undefined ? { id, dependsOn } : { id, dependsOn, data };
+}
+
+function dependencyAdded<T, E>(id: NodeId, dependsOn: NodeId, data: E | undefined): GraphChange<T, E> {
+  return data === undefined
+    ? { type: "dependency-added", id, dependsOn }
+    : { type: "dependency-added", id, dependsOn, data };
+}
+
+function parseDependency<E>(spec: NodeId | DependencySpec<E>): [NodeId, E | undefined] {
+  if (typeof spec === "string") {
+    return [spec, undefined];
+  }
+  if (typeof spec !== "object" || spec === null || typeof spec.id !== "string") {
+    throw new TypeError("Each dependency must be a node id or an object with a string id.");
+  }
+  return [spec.id, spec.data];
 }
 
 function assertPriority(priority: unknown): asserts priority is number {

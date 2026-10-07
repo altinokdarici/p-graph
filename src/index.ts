@@ -2,6 +2,7 @@ export { PriorityGraph } from "./priority-graph.js";
 export { applyChanges } from "./apply-changes.js";
 export {
   CycleError,
+  DependencyNotFoundError,
   DuplicateNodeError,
   InvalidSnapshotError,
   InvalidStateError,
@@ -12,6 +13,7 @@ export {
 export type {
   AddNodeOptions,
   DependencyRecord,
+  DependencySpec,
   GraphChange,
   GraphNode,
   GraphSnapshot,

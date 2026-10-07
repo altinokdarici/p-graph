@@ -1,9 +1,10 @@
 # p-graph
 
-A **dynamic priority graph** for TypeScript: a priority queue whose items can depend on each other.
+A **dynamic priority graph with labelled edges** for TypeScript: a priority queue whose items can depend on each other.
 
 - A node is handed out only after all of its dependencies have completed. Ready nodes come out **highest priority first** (ties in insertion order).
 - The graph is **fully dynamic**. You can add nodes, add or remove dependencies, change priorities and remove nodes at any time, including in the middle of a traversal.
+- **Labelled edges:** every dependency can carry your own data (a label, a condition, who added it, ...), typed and persisted alongside the graph.
 - **Incremental persistence:** every mutation emits a small batch of per-node and per-edge changes to an injected store, so you can keep the graph in SQL, a JSON document, a key-value store or anything else, writing only what changed. The library never serializes anything itself.
 - Optional **priority inheritance**, so prerequisites of urgent work run first.
 - Cycle detection, strict TypeScript types, ESM, and zero runtime dependencies.
@@ -65,6 +66,34 @@ stateDiagram-v2
 
 Only nodes that have not started (`pending` or `ready`) can gain new dependencies. Adding an edge that would create a cycle throws a `CycleError` that names the cycle.
 
+## Edge data
+
+`PriorityGraph<T, E>` takes a second type parameter for data attached to dependency edges. Like node data, the graph stores it but never interprets it:
+
+```ts
+interface Edge {
+  label: string;
+  when?: "pass" | "fail";
+  addedBy?: string;
+}
+
+const graph = new PriorityGraph<{ title: string }, Edge>();
+graph.addNode("evals", { title: "Run evals" });
+graph.addNode("ship", { title: "Ship" }, {
+  dependsOn: [{ id: "evals", data: { label: "if evals pass", when: "pass" } }], // or just "evals"
+});
+graph.addNode("notes", { title: "Release notes" });
+graph.addDependency("ship", "notes", { label: "after notes" });
+
+graph.setDependencyData("ship", "notes", { label: "after notes", addedBy: "fix-A" });
+graph.dependencyEdges("ship"); // [{ id: "ship", dependsOn: "evals", data: {...} }, { id: "ship", dependsOn: "notes", data: {...} }]
+graph.dependentEdges("evals"); // [{ id: "ship", dependsOn: "evals", data: {...} }]
+```
+
+- `addDependency` on an existing edge is still a no-op and leaves its data unchanged; use `setDependencyData` (which throws `DependencyNotFoundError` if the edge does not exist).
+- `dependenciesOf`, `dependentsOf` and `GraphNode.dependencies` keep returning plain ids.
+- `E` defaults to `undefined`, so existing code is unaffected.
+
 ## Priority inheritance
 
 ```ts
@@ -83,18 +112,19 @@ With `inheritPriority`, a node's `effectivePriority` is the maximum of its own p
 Pass a `store` to the graph. It receives one batch of `GraphChange`s per mutating call, which makes each batch a natural transaction:
 
 ```ts
-type GraphChange<T> =
+type GraphChange<T, E = undefined> =
   | { type: "node-added"; node: NodeRecord<T> }
   | { type: "node-updated"; node: NodeRecord<T>; fields: ("data" | "priority" | "state")[] }
   | { type: "node-removed"; id: string }
-  | { type: "dependency-added"; id: string; dependsOn: string }
+  | { type: "dependency-added"; id: string; dependsOn: string; data?: E }
+  | { type: "dependency-updated"; id: string; dependsOn: string; data: E }
   | { type: "dependency-removed"; id: string; dependsOn: string };
 
 interface NodeRecord<T> { id: string; data: T; priority: number; state: NodeState; order: number }
 ```
 
-- Each node is a self-contained record, and each edge is a `{ id, dependsOn }` record. They map one-to-one to rows in a `nodes` table and a `dependencies` table.
-- Your store decides how to encode the node's `data` (a JSON column, separate columns, a blob, ...).
+- Each node is a self-contained record, and each edge is a `{ id, dependsOn, data? }` record (`data` is omitted when the edge has none). They map one-to-one to rows in a `nodes` table and a `dependencies` table.
+- Your store decides how to encode node and edge `data` (a JSON column, separate columns, a blob, ...).
 - When a node is removed, its edges are removed first, so foreign keys stay valid.
 - `apply` may be synchronous or return a promise. Batches are always delivered in order and one at a time. `await graph.flush()` waits until all of them have been applied.
 - If the store throws or rejects, the graph records a `StoreError` (`graph.storeError`), rejects `flush()`, and refuses further mutations, so it never silently drifts from storage. Reload it from the store to recover.
@@ -106,12 +136,12 @@ import type { GraphChange, GraphStore } from "@altinokdarici/p-graph";
 
 // CREATE TABLE nodes (id TEXT PRIMARY KEY, data TEXT, priority REAL, state TEXT, "order" INTEGER);
 // CREATE TABLE dependencies (id TEXT REFERENCES nodes(id), depends_on TEXT REFERENCES nodes(id),
-//                            PRIMARY KEY (id, depends_on));
+//                            data TEXT, PRIMARY KEY (id, depends_on));
 
-class SqlStore<T> implements GraphStore<T> {
+class SqlStore<T, E = undefined> implements GraphStore<T, E> {
   constructor(private readonly db: Database) {}
 
-  async apply(changes: readonly GraphChange<T>[]) {
+  async apply(changes: readonly GraphChange<T, E>[]) {
     await this.db.transaction(async (tx) => {
       for (const change of changes) {
         switch (change.type) {
@@ -134,7 +164,14 @@ class SqlStore<T> implements GraphStore<T> {
             await tx.run(`DELETE FROM nodes WHERE id = ?`, [change.id]);
             break;
           case "dependency-added":
-            await tx.run(`INSERT INTO dependencies (id, depends_on) VALUES (?, ?)`, [change.id, change.dependsOn]);
+            await tx.run(`INSERT INTO dependencies (id, depends_on, data) VALUES (?, ?, ?)`, [
+              change.id, change.dependsOn, change.data === undefined ? null : JSON.stringify(change.data),
+            ]);
+            break;
+          case "dependency-updated":
+            await tx.run(`UPDATE dependencies SET data = ? WHERE id = ? AND depends_on = ?`, [
+              JSON.stringify(change.data), change.id, change.dependsOn,
+            ]);
             break;
           case "dependency-removed":
             await tx.run(`DELETE FROM dependencies WHERE id = ? AND depends_on = ?`, [change.id, change.dependsOn]);
@@ -156,13 +193,13 @@ Use `change.fields` if you only want to write the columns that changed.
 import { applyChanges, type GraphChange, type GraphSnapshot, type GraphStore } from "@altinokdarici/p-graph";
 import { writeFileSync } from "node:fs";
 
-class JsonFileStore<T> implements GraphStore<T> {
+class JsonFileStore<T, E = undefined> implements GraphStore<T, E> {
   constructor(
     private readonly path: string,
-    private readonly document: GraphSnapshot<T> = { version: 1, nodes: [], dependencies: [] },
+    private readonly document: GraphSnapshot<T, E> = { version: 1, nodes: [], dependencies: [] },
   ) {}
 
-  apply(changes: readonly GraphChange<T>[]) {
+  apply(changes: readonly GraphChange<T, E>[]) {
     applyChanges(this.document, changes);
     writeFileSync(this.path, JSON.stringify(this.document));
   }
@@ -182,32 +219,34 @@ const graph = PriorityGraph.fromSnapshot(
 );
 ```
 
-`pending`/`ready` states and effective priorities are derived from the dependencies, so a stale stored value for them is corrected on load. The snapshot is validated: unknown references, duplicate ids or orders, cycles, and started nodes with incomplete dependencies all throw. Loading itself does not emit changes.
+`pending`/`ready` states and effective priorities are derived from the dependencies, so a stale stored value for them is corrected on load. The snapshot is validated: unknown references, duplicate ids or orders, cycles, and started nodes with incomplete dependencies all throw. Edge `data` is restored as stored. Loading itself does not emit changes.
 
 ## API
 
 | Member | Description |
 | --- | --- |
-| `new PriorityGraph<T>(options?)` | Options: `inheritPriority` (default `false`), `defaultPriority` (default `0`), `store`. |
+| `new PriorityGraph<T, E>(options?)` | Options: `inheritPriority` (default `false`), `defaultPriority` (default `0`), `store`. |
 | `PriorityGraph.fromSnapshot(snapshot, options?)` | Restores a graph. |
-| `addNode(id, data, { priority?, dependsOn? })` | Adds a node. Dependencies must already exist. |
+| `addNode(id, data, { priority?, dependsOn? })` | Adds a node. `dependsOn` entries are ids or `{ id, data? }`; they must already exist. |
 | `removeNode(id)` | Removes a node and its edges. Its dependents stop waiting on it. |
 | `pruneCompleted()` | Removes all completed nodes. Returns how many were removed. |
 | `setPriority(id, priority)` / `setData(id, data)` | Updates a node. |
-| `addDependency(id, dependsOn)` / `removeDependency(id, dependsOn)` | Edits edges. |
+| `addDependency(id, dependsOn, data?)` / `removeDependency(id, dependsOn)` | Edits edges. |
+| `setDependencyData(id, dependsOn, data)` | Replaces an edge's data. Emits `dependency-updated`. |
 | `peek()` | The next ready node, without dequeuing it. |
 | `dequeue()` | Takes the next ready node and marks it `in-progress`. |
 | `complete(id)` | Completes an `in-progress` node. Returns the ids of nodes that became ready. |
 | `requeue(id)` | Puts an `in-progress` node back into the queue. |
 | `traverse()` | Generator over ready nodes that completes each one as you go. It sees changes made during the loop. If you leave the loop early, the current node stays `in-progress`. |
 | `get(id)`, `has(id)`, `nodes(state?)`, `count(state?)`, `size`, `isComplete` | Queries. |
-| `dependenciesOf(id)`, `dependentsOf(id)` | Edge queries. |
+| `dependenciesOf(id)`, `dependentsOf(id)` | Edge queries (ids). |
+| `dependencyEdges(id)`, `dependentEdges(id)` | Edge queries returning `{ id, dependsOn, data? }` records. |
 | `toSnapshot()` | Plain-object copy of the whole graph. |
 | `flush()` | Resolves when the store has applied every batch. |
 | `storeError` | The `StoreError` that stopped the graph, if any. |
 | `applyChanges(snapshot, changes)` | Applies a change batch to a snapshot in place. |
 
-Errors: `PriorityGraphError` is the base class of `NodeNotFoundError`, `DuplicateNodeError`, `CycleError`, `InvalidStateError`, `InvalidSnapshotError` and `StoreError`.
+Errors: `PriorityGraphError` is the base class of `NodeNotFoundError`, `DuplicateNodeError`, `CycleError`, `InvalidStateError`, `DependencyNotFoundError`, `InvalidSnapshotError` and `StoreError`.
 
 ### Complexity
 

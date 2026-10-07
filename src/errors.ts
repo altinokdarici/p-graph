@@ -15,6 +15,16 @@ export class NodeNotFoundError extends PriorityGraphError {
   }
 }
 
+/** Thrown when an operation references a dependency edge that does not exist. */
+export class DependencyNotFoundError extends PriorityGraphError {
+  constructor(
+    readonly id: NodeId,
+    readonly dependsOn: NodeId,
+  ) {
+    super(`Node "${id}" does not depend on "${dependsOn}".`);
+  }
+}
+
 /** Thrown when adding a node whose id is already in use. */
 export class DuplicateNodeError extends PriorityGraphError {
   constructor(readonly id: NodeId) {

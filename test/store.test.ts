@@ -11,21 +11,21 @@ import {
 const emptySnapshot = <T>(): GraphSnapshot<T> => ({ version: 1, nodes: [], dependencies: [] });
 
 /** Order-insensitive form of a snapshot, for comparisons. */
-function normalize<T>(snapshot: GraphSnapshot<T>) {
+function normalize<T, E>(snapshot: GraphSnapshot<T, E>) {
   return {
     version: snapshot.version,
     nodes: [...snapshot.nodes].sort((a, b) => a.order - b.order),
     dependencies: snapshot.dependencies
-      .map((edge) => `${edge.id}->${edge.dependsOn}`)
+      .map((edge) => `${edge.id}->${edge.dependsOn}${"data" in edge ? `:${JSON.stringify(edge.data)}` : ""}`)
       .sort(),
   };
 }
 
-class RecordingStore<T> implements GraphStore<T> {
-  readonly batches: GraphChange<T>[][] = [];
-  readonly document = emptySnapshot<T>();
+class RecordingStore<T, E = undefined> implements GraphStore<T, E> {
+  readonly batches: GraphChange<T, E>[][] = [];
+  readonly document: GraphSnapshot<T, E> = { version: 1, nodes: [], dependencies: [] };
 
-  apply(changes: readonly GraphChange<T>[]): void {
+  apply(changes: readonly GraphChange<T, E>[]): void {
     this.batches.push([...changes]);
     applyChanges(this.document, changes);
   }
@@ -207,8 +207,8 @@ describe("incremental store", () => {
       const pick = <T>(items: readonly T[]): T | undefined =>
         items[Math.floor(random() * items.length)];
       const inheritPriority = seed % 2 === 0;
-      const store = new RecordingStore<number>();
-      const graph = new PriorityGraph<number>({ store, inheritPriority });
+      const store = new RecordingStore<number, string>();
+      const graph = new PriorityGraph<number, string>({ store, inheritPriority });
       let next = 0;
 
       for (let step = 0; step < 300; step++) {
@@ -217,7 +217,9 @@ describe("incremental store", () => {
         const roll = random();
         try {
           if (roll < 0.3 || all.length === 0) {
-            const dependsOn = allIds.filter(() => random() < 0.15);
+            const dependsOn = allIds
+              .filter(() => random() < 0.15)
+              .map((id) => (random() < 0.5 ? id : { id, data: `s${step}` }));
             graph.addNode(`n${next++}`, step, { priority: Math.floor(random() * 10), dependsOn });
           } else if (roll < 0.5) {
             const node = graph.dequeue();
@@ -235,7 +237,7 @@ describe("incremental store", () => {
               }
             }
           } else if (roll < 0.72) {
-            graph.addDependency(pick(allIds)!, pick(allIds)!);
+            graph.addDependency(pick(allIds)!, pick(allIds)!, random() < 0.5 ? `a${step}` : undefined);
           } else if (roll < 0.8) {
             const node = pick(all.filter((n) => n.dependencies.length > 0));
             if (node) {
@@ -243,12 +245,17 @@ describe("incremental store", () => {
             }
           } else if (roll < 0.88) {
             graph.setPriority(pick(allIds)!, Math.floor(random() * 10));
-          } else if (roll < 0.95) {
+          } else if (roll < 0.92) {
             graph.removeNode(pick(allIds)!);
-          } else if (roll < 0.97) {
+          } else if (roll < 0.93) {
             graph.pruneCompleted();
-          } else {
+          } else if (roll < 0.95) {
             graph.setData(pick(allIds)!, -step);
+          } else {
+            const node = pick(all.filter((n) => n.dependencies.length > 0));
+            if (node) {
+              graph.setDependencyData(node.id, pick(node.dependencies)!, `u${step}`);
+            }
           }
         } catch (error) {
           if (!(error instanceof Error) || !/cycle|Cannot/i.test(error.message)) {
@@ -261,8 +268,9 @@ describe("incremental store", () => {
       }
 
       const restored = PriorityGraph.fromSnapshot(structuredClone(store.document), { inheritPriority });
+      expect(normalize(restored.toSnapshot())).toEqual(normalize(graph.toSnapshot()));
       expect([...restored.nodes()].map(sortDeps)).toEqual([...graph.nodes()].map(sortDeps));
-      const order = (g: PriorityGraph<number>) => [...g.traverse()].map((node) => node.id);
+      const order = (g: PriorityGraph<number, string>) => [...g.traverse()].map((node) => node.id);
       expect(order(restored)).toEqual(order(graph));
     }
   });
@@ -272,7 +280,7 @@ function sortDeps<T extends { dependencies: readonly string[] }>(node: T): T {
   return { ...node, dependencies: [...node.dependencies].sort() };
 }
 
-function checkInvariants(graph: PriorityGraph<number>, inheritPriority: boolean): void {
+function checkInvariants(graph: PriorityGraph<number, string>, inheritPriority: boolean): void {
   const nodes = new Map([...graph.nodes()].map((node) => [node.id, node]));
   const effective = new Map<string, number>();
   const effectiveOf = (id: string): number => {
