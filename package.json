@@ -1,0 +1,49 @@
+{
+  "name": "@altinokdarici/p-graph",
+  "version": "0.1.0",
+  "description": "A dynamic, dependency-aware priority graph (priority queue + DAG) for TypeScript with pluggable serialization.",
+  "keywords": [
+    "priority",
+    "graph",
+    "priority-queue",
+    "dag",
+    "topological-sort",
+    "scheduler",
+    "dependency-graph"
+  ],
+  "license": "MIT",
+  "author": "Altinok Darici",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/altinokdarici/p-graph.git"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build",
+    "prepare": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}
