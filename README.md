@@ -1,5 +1,7 @@
 # p-graph
 
+[![CI](https://github.com/altinokdarici/p-graph/actions/workflows/ci.yml/badge.svg)](https://github.com/altinokdarici/p-graph/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/@altinokdarici/p-graph)](https://www.npmjs.com/package/@altinokdarici/p-graph)
+
 A **dynamic priority graph with labelled edges** for TypeScript: a priority queue whose items can depend on each other.
 
 - A node is handed out only after all of its dependencies have completed. Ready nodes come out **highest priority first** (ties in insertion order).
@@ -10,7 +12,7 @@ A **dynamic priority graph with labelled edges** for TypeScript: a priority queu
 - Cycle detection, strict TypeScript types, ESM, and zero runtime dependencies.
 
 ```sh
-npm install github:altinokdarici/p-graph
+npm install @altinokdarici/p-graph
 ```
 
 ## Quick start

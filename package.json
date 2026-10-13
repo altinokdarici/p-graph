@@ -18,6 +18,10 @@
     "type": "git",
     "url": "git+https://github.com/altinokdarici/p-graph.git"
   },
+  "homepage": "https://github.com/altinokdarici/p-graph#readme",
+  "bugs": {
+    "url": "https://github.com/altinokdarici/p-graph/issues"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -28,8 +32,12 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "src"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "sideEffects": false,
   "engines": {
     "node": ">=18"
