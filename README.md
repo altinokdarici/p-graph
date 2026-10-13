@@ -263,6 +263,10 @@ npm run typecheck
 npm run build     # emits ESM + .d.ts to lib/
 ```
 
+### Releasing
+
+Bump `version` in `package.json`, update `CHANGELOG.md`, merge, then publish a GitHub Release tagged `v<version>`. The `Publish` workflow runs the checks and publishes to npm through trusted publishing (OIDC, with provenance), so no npm token is stored.
+
 ## License
 
 MIT
