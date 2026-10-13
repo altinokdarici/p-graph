@@ -1,5 +1,7 @@
 # p-graph
 
+[![CI](https://github.com/altinokdarici/p-graph/actions/workflows/ci.yml/badge.svg)](https://github.com/altinokdarici/p-graph/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/@altinok/p-graph)](https://www.npmjs.com/package/@altinok/p-graph)
+
 A **dynamic priority graph with labelled edges** for TypeScript: a priority queue whose items can depend on each other.
 
 - A node is handed out only after all of its dependencies have completed. Ready nodes come out **highest priority first** (ties in insertion order).
@@ -10,13 +12,13 @@ A **dynamic priority graph with labelled edges** for TypeScript: a priority queu
 - Cycle detection, strict TypeScript types, ESM, and zero runtime dependencies.
 
 ```sh
-npm install github:altinokdarici/p-graph
+npm install @altinok/p-graph
 ```
 
 ## Quick start
 
 ```ts
-import { PriorityGraph } from "@altinokdarici/p-graph";
+import { PriorityGraph } from "@altinok/p-graph";
 
 const graph = new PriorityGraph<{ title: string }>();
 
@@ -132,7 +134,7 @@ interface NodeRecord<T> { id: string; data: T; priority: number; state: NodeStat
 ### Example: SQL store
 
 ```ts
-import type { GraphChange, GraphStore } from "@altinokdarici/p-graph";
+import type { GraphChange, GraphStore } from "@altinok/p-graph";
 
 // CREATE TABLE nodes (id TEXT PRIMARY KEY, data TEXT, priority REAL, state TEXT, "order" INTEGER);
 // CREATE TABLE dependencies (id TEXT REFERENCES nodes(id), depends_on TEXT REFERENCES nodes(id),
@@ -190,7 +192,7 @@ Use `change.fields` if you only want to write the columns that changed.
 `applyChanges` applies a batch to a `GraphSnapshot` in place, which is all a whole-document store needs:
 
 ```ts
-import { applyChanges, type GraphChange, type GraphSnapshot, type GraphStore } from "@altinokdarici/p-graph";
+import { applyChanges, type GraphChange, type GraphSnapshot, type GraphStore } from "@altinok/p-graph";
 import { writeFileSync } from "node:fs";
 
 class JsonFileStore<T, E = undefined> implements GraphStore<T, E> {
@@ -258,7 +260,7 @@ With `n` nodes: `dequeue`, `requeue`, `setPriority` and making a node ready are 
 npm install
 npm test          # vitest
 npm run typecheck
-npm run build     # emits ESM + .d.ts to dist/
+npm run build     # emits ESM + .d.ts to lib/
 ```
 
 ## License

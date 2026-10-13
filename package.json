@@ -1,5 +1,5 @@
 {
-  "name": "@altinokdarici/p-graph",
+  "name": "@altinok/p-graph",
   "version": "0.1.0",
   "description": "A dynamic priority graph with labelled edges: a dependency-aware priority queue for TypeScript with pluggable serialization.",
   "keywords": [
@@ -18,21 +18,28 @@
     "type": "git",
     "url": "git+https://github.com/altinokdarici/p-graph.git"
   },
+  "homepage": "https://github.com/altinokdarici/p-graph#readme",
+  "bugs": {
+    "url": "https://github.com/altinokdarici/p-graph/issues"
+  },
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js"
     }
   },
   "files": [
-    "dist"
+    "lib"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "sideEffects": false,
   "engines": {
-    "node": ">=18"
+    "node": ">=24"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -43,7 +50,7 @@
     "prepare": "npm run build"
   },
   "devDependencies": {
-    "@types/node": "^26.6.4",
+    "@types/node": "^24.19.2",
     "typescript": "^7.0.2",
     "vitest": "^5.0.3"
   }
