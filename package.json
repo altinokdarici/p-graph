@@ -39,7 +39,7 @@
   },
   "sideEffects": false,
   "engines": {
-    "node": ">=18"
+    "node": ">=24"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -50,7 +50,7 @@
     "prepare": "npm run build"
   },
   "devDependencies": {
-    "@types/node": "^26.6.4",
+    "@types/node": "^24.19.2",
     "typescript": "^7.0.2",
     "vitest": "^5.0.3"
   }
