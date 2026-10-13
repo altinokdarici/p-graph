@@ -23,16 +23,16 @@
     "url": "https://github.com/altinokdarici/p-graph/issues"
   },
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js"
     }
   },
   "files": [
-    "dist",
+    "lib",
     "src"
   ],
   "publishConfig": {

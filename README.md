@@ -260,7 +260,7 @@ With `n` nodes: `dequeue`, `requeue`, `setPriority` and making a node ready are 
 npm install
 npm test          # vitest
 npm run typecheck
-npm run build     # emits ESM + .d.ts to dist/
+npm run build     # emits ESM + .d.ts to lib/
 ```
 
 ## License
